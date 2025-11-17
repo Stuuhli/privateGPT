@@ -1,10 +1,20 @@
 import argparse
 import os
 import shutil
+from pathlib import Path
 from typing import Any, ClassVar
 
 from private_gpt.paths import local_data_path
 from private_gpt.settings.settings import settings
+
+try:
+    from private_gpt.components.node_store.sqlite_store import (
+        DOCSTORE_DB as SQLITE_DOCSTORE,
+        INDEXSTORE_DB as SQLITE_INDEXSTORE,
+    )
+except Exception:
+    SQLITE_DOCSTORE = "docstore.sqlite"
+    SQLITE_INDEXSTORE = "indexstore.sqlite"
 
 
 def wipe_file(file: str) -> None:
@@ -103,6 +113,47 @@ class Simple:
             wipe_file(str((local_data_path / store).absolute()))
 
 
+class Sqlite:
+    def _db_paths(self) -> list[Path]:
+        return [local_data_path / SQLITE_DOCSTORE, local_data_path / SQLITE_INDEXSTORE]
+
+    def wipe(self, store_type: str) -> None:
+        assert store_type == "nodestore"
+        for db_path in self._db_paths():
+            wipe_file(str(db_path.absolute()))
+
+    def stats(self, store_type: str) -> None:
+        assert store_type == "nodestore"
+        import sqlite3
+
+        for db_path in self._db_paths():
+            if not db_path.exists():
+                print(f"{db_path.name}: not found")
+                continue
+
+            connection = sqlite3.connect(db_path)
+            try:
+                if db_path.name == SQLITE_DOCSTORE:
+                    queries = {
+                        "documents": "SELECT COUNT(*) FROM documents",
+                        "ref_doc_info": "SELECT COUNT(*) FROM ref_doc_info",
+                        "metadata": "SELECT COUNT(*) FROM metadata",
+                    }
+                else:
+                    queries = {"index_metadata": "SELECT COUNT(*) FROM index_metadata"}
+
+                print(f"Storage for SQLite {db_path.name}.")
+                for table, query in queries.items():
+                    try:
+                        cursor = connection.execute(query)
+                        count = cursor.fetchone()[0]
+                    except sqlite3.OperationalError:
+                        count = 0
+                    print(f"\t{table}: {count:,} rows")
+            finally:
+                connection.close()
+
+
 class Chroma:
     def wipe(self, store_type: str) -> None:
         assert store_type == "vectorstore"
@@ -148,6 +199,7 @@ class Qdrant:
 class Command:
     DB_HANDLERS: ClassVar[dict[str, Any]] = {
         "simple": Simple,  # node store
+        "sqlite": Sqlite,  # node store
         "chroma": Chroma,  # vector store
         "postgres": Postgres,  # node, index and vector store
         "qdrant": Qdrant,  # vector store
