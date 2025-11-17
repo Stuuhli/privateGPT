@@ -157,7 +157,7 @@ class VectorstoreSettings(BaseModel):
 
 
 class NodeStoreSettings(BaseModel):
-    database: Literal["simple", "postgres"]
+    database: Literal["simple", "sqlite", "postgres"]
 
 
 class LlamaCPPSettings(BaseModel):

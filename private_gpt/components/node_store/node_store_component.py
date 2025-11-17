@@ -8,6 +8,8 @@ from llama_index.core.storage.index_store.types import BaseIndexStore
 from private_gpt.paths import local_data_path
 from private_gpt.settings.settings import Settings
 
+from .sqlite_store import SqliteDocumentStore, SqliteIndexStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +37,23 @@ class NodeStoreComponent:
                 except FileNotFoundError:
                     logger.debug("Local document store not found, creating a new one")
                     self.doc_store = SimpleDocumentStore()
+
+            case "sqlite":
+                try:
+                    self.index_store = SqliteIndexStore.from_persist_dir(
+                        persist_dir=str(local_data_path)
+                    )
+                except FileNotFoundError:
+                    logger.debug("SQLite index store not found, creating a new one")
+                    self.index_store = SqliteIndexStore()
+
+                try:
+                    self.doc_store = SqliteDocumentStore.from_persist_dir(
+                        persist_dir=str(local_data_path)
+                    )
+                except FileNotFoundError:
+                    logger.debug("SQLite document store not found, creating a new one")
+                    self.doc_store = SqliteDocumentStore()
 
             case "postgres":
                 try:
