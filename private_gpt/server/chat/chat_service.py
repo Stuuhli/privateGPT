@@ -2,17 +2,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from injector import inject, singleton
-from llama_index.core.chat_engine import ContextChatEngine, SimpleChatEngine
-from llama_index.core.chat_engine.types import (
-    BaseChatEngine,
-)
 from llama_index.core.indices import VectorStoreIndex
-from llama_index.core.indices.postprocessor import MetadataReplacementPostProcessor
 from llama_index.core.llms import ChatMessage, MessageRole
-from llama_index.core.postprocessor import (
-    SentenceTransformerRerank,
-    SimilarityPostprocessor,
-)
 from llama_index.core.storage import StorageContext
 from llama_index.core.types import TokenGen
 from pydantic import BaseModel
@@ -25,6 +16,8 @@ from private_gpt.components.vector_store.vector_store_component import (
 )
 from private_gpt.open_ai.extensions.context_filter import ContextFilter
 from private_gpt.server.chunks.chunks_service import Chunk
+from private_gpt.server.chat.inline_citations import InlineCitationFormatter
+from private_gpt.server.chat.rag_workflow import RagWorkflowFactory, RagWorkflowInput
 from private_gpt.settings.settings import Settings
 
 if TYPE_CHECKING:
@@ -92,6 +85,7 @@ class ChatService:
         self.llm_component = llm_component
         self.embedding_component = embedding_component
         self.vector_store_component = vector_store_component
+        self.citation_formatter = InlineCitationFormatter()
         self.storage_context = StorageContext.from_defaults(
             vector_store=vector_store_component.vector_store,
             docstore=node_store_component.doc_store,
@@ -104,47 +98,37 @@ class ChatService:
             embed_model=embedding_component.embedding_model,
             show_progress=True,
         )
+        self.rag_workflow_factory = RagWorkflowFactory(
+            settings=settings,
+            llm_component=llm_component,
+            vector_store_component=vector_store_component,
+            index=self.index,
+        )
 
-    def _chat_engine(
+    def _workflow_input(
         self,
-        system_prompt: str | None = None,
-        use_context: bool = False,
-        context_filter: ContextFilter | None = None,
-    ) -> BaseChatEngine:
-        settings = self.settings
-        if use_context:
-            vector_index_retriever = self.vector_store_component.get_retriever(
-                index=self.index,
-                context_filter=context_filter,
-                similarity_top_k=self.settings.rag.similarity_top_k,
-            )
-            node_postprocessors: list[BaseNodePostprocessor] = [
-                MetadataReplacementPostProcessor(target_metadata_key="window"),
-            ]
-            if settings.rag.similarity_value:
-                node_postprocessors.append(
-                    SimilarityPostprocessor(
-                        similarity_cutoff=settings.rag.similarity_value
-                    )
-                )
+        system_prompt: str | None,
+        use_context: bool,
+        context_filter: ContextFilter | None,
+    ) -> RagWorkflowInput:
+        return RagWorkflowInput(
+            system_prompt=system_prompt,
+            use_context=use_context,
+            context_filter=context_filter,
+        )
 
-            if settings.rag.rerank.enabled:
-                rerank_postprocessor = SentenceTransformerRerank(
-                    model=settings.rag.rerank.model, top_n=settings.rag.rerank.top_n
-                )
-                node_postprocessors.append(rerank_postprocessor)
+    def _decorate_response(self, text: str, sources: list[Chunk], use_context: bool) -> str:
+        if not use_context:
+            return text
+        return self.citation_formatter.decorate(text, sources)
 
-            return ContextChatEngine.from_defaults(
-                system_prompt=system_prompt,
-                retriever=vector_index_retriever,
-                llm=self.llm_component.llm,  # Takes no effect at the moment
-                node_postprocessors=node_postprocessors,
-            )
-        else:
-            return SimpleChatEngine.from_defaults(
-                system_prompt=system_prompt,
-                llm=self.llm_component.llm,
-            )
+    def _append_suffix_to_generator(self, generator: TokenGen, suffix: str) -> TokenGen:
+        def _generator() -> TokenGen:
+            for token in generator:
+                yield token
+            yield suffix
+
+        return _generator()
 
     def stream_chat(
         self,
@@ -167,18 +151,30 @@ class ChatService:
             chat_engine_input.chat_history if chat_engine_input.chat_history else None
         )
 
-        chat_engine = self._chat_engine(
+        workflow_input = self._workflow_input(
             system_prompt=system_prompt,
             use_context=use_context,
             context_filter=context_filter,
         )
+        chat_engine = self.rag_workflow_factory.build_chat_engine(workflow_input)
         streaming_response = chat_engine.stream_chat(
             message=last_message if last_message is not None else "",
             chat_history=chat_history,
         )
         sources = [Chunk.from_node(node) for node in streaming_response.source_nodes]
+        suffix = (
+            self.citation_formatter.build_suffix(sources)
+            if use_context and sources
+            else ""
+        )
+        response_gen = (
+            self._append_suffix_to_generator(streaming_response.response_gen, suffix)
+            if suffix
+            else streaming_response.response_gen
+        )
         completion_gen = CompletionGen(
-            response=streaming_response.response_gen, sources=sources
+            response=response_gen,
+            sources=sources,
         )
         return completion_gen
 
@@ -203,15 +199,19 @@ class ChatService:
             chat_engine_input.chat_history if chat_engine_input.chat_history else None
         )
 
-        chat_engine = self._chat_engine(
+        workflow_input = self._workflow_input(
             system_prompt=system_prompt,
             use_context=use_context,
             context_filter=context_filter,
         )
+        chat_engine = self.rag_workflow_factory.build_chat_engine(workflow_input)
         wrapped_response = chat_engine.chat(
             message=last_message if last_message is not None else "",
             chat_history=chat_history,
         )
         sources = [Chunk.from_node(node) for node in wrapped_response.source_nodes]
-        completion = Completion(response=wrapped_response.response, sources=sources)
+        response_text = self._decorate_response(
+            wrapped_response.response, sources, use_context
+        )
+        completion = Completion(response=response_text, sources=sources)
         return completion
