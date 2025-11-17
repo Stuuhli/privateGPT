@@ -25,6 +25,10 @@ data:
 ui:
   enabled: true
   path: /
+  auth:
+    enabled: true
+    username: admin@example.com
+    password: ChangeMe123!
   # "RAG", "Search", "Basic", or "Summarize"
   default_mode: "RAG"
   default_chat_system_prompt: >
@@ -47,8 +51,8 @@ ui:
   delete_all_files_button_enabled: true
 
 llm:
-  mode: llamacpp
-  prompt_style: "llama3"
+  mode: ollama
+  prompt_style: "chatml"
   # Should be matching the selected model
   max_new_tokens: 512
   context_window: 3900
@@ -86,9 +90,9 @@ llamacpp:
 
 embedding:
   # Should be matching the value above in most cases
-  mode: huggingface
+  mode: ollama
   ingest_mode: simple
-  embed_dim: 768 # 768 is for nomic-ai/nomic-embed-text-v1.5
+  embed_dim: 1536 # 1536 matches qwen3-embedding:0.6b
 
 huggingface:
   embedding_hf_model_name: nomic-ai/nomic-embed-text-v1.5
@@ -129,8 +133,8 @@ openai:
   embedding_api_key: ${OPENAI_API_KEY:}
 
 ollama:
-  llm_model: llama3.1
-  embedding_model: nomic-embed-text
+  llm_model: qwen3:4b
+  embedding_model: qwen3-embedding:0.6b
   api_base: http://localhost:11434
   embedding_api_base: http://localhost:11434  # change if your embedding model runs on another ollama
   keep_alive: 5m
