@@ -1,63 +1,21 @@
 import logging
+import re
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
-from llama_index.core.readers import StringIterableReader
-from llama_index.core.readers.base import BaseReader
-from llama_index.core.readers.json import JSONReader
 from llama_index.core.schema import Document
 
 logger = logging.getLogger(__name__)
 
 
-# Inspired by the `llama_index.core.readers.file.base` module
-def _try_loading_included_file_formats() -> dict[str, type[BaseReader]]:
-    try:
-        from llama_index.readers.file.docs import (  # type: ignore
-            DocxReader,
-            HWPReader,
-            PDFReader,
-        )
-        from llama_index.readers.file.epub import EpubReader  # type: ignore
-        from llama_index.readers.file.image import ImageReader  # type: ignore
-        from llama_index.readers.file.ipynb import IPYNBReader  # type: ignore
-        from llama_index.readers.file.markdown import MarkdownReader  # type: ignore
-        from llama_index.readers.file.mbox import MboxReader  # type: ignore
-        from llama_index.readers.file.slides import PptxReader  # type: ignore
-        from llama_index.readers.file.tabular import PandasCSVReader  # type: ignore
-        from llama_index.readers.file.video_audio import (  # type: ignore
-            VideoAudioReader,
-        )
-    except ImportError as e:
-        raise ImportError("`llama-index-readers-file` package not found") from e
-
-    default_file_reader_cls: dict[str, type[BaseReader]] = {
-        ".hwp": HWPReader,
-        ".pdf": PDFReader,
-        ".docx": DocxReader,
-        ".pptx": PptxReader,
-        ".ppt": PptxReader,
-        ".pptm": PptxReader,
-        ".jpg": ImageReader,
-        ".png": ImageReader,
-        ".jpeg": ImageReader,
-        ".mp3": VideoAudioReader,
-        ".mp4": VideoAudioReader,
-        ".csv": PandasCSVReader,
-        ".epub": EpubReader,
-        ".md": MarkdownReader,
-        ".mbox": MboxReader,
-        ".ipynb": IPYNBReader,
-    }
-    return default_file_reader_cls
+try:
+    from llama_index.readers.docling import DoclingReader
+except ImportError:  # pragma: no cover - dependency is optional at runtime
+    DoclingReader = None
 
 
-# Patching the default file reader to support other file types
-FILE_READER_CLS = _try_loading_included_file_formats()
-FILE_READER_CLS.update(
-    {
-        ".json": JSONReader,
-    }
-)
+_HEADING_PATTERN = re.compile(r"^(?P<heading>#{1,6}\s+.+)$", re.MULTILINE)
 
 
 class IngestionHelper:
@@ -80,28 +38,80 @@ class IngestionHelper:
     @staticmethod
     def _load_file_to_documents(file_name: str, file_data: Path) -> list[Document]:
         logger.debug("Transforming file_name=%s into documents", file_name)
-        extension = Path(file_name).suffix
-        reader_cls = FILE_READER_CLS.get(extension)
-        if reader_cls is None:
-            logger.debug(
-                "No reader found for extension=%s, using default string reader",
-                extension,
+        if DoclingReader is None:
+            raise ImportError(
+                "DoclingReader is required but not available. Install the "
+                "`llama-index-readers-docling` extra to enable document ingestion."
             )
-            # Read as a plain text
-            string_reader = StringIterableReader()
-            return string_reader.load_data([file_data.read_text()])
 
-        logger.debug("Specific reader found for extension=%s", extension)
-        documents = reader_cls().load_data(file_data)
+        reader = DoclingReader()
+        docling_documents = reader.load_data(file_data)
 
-        # Sanitize NUL bytes in text which can't be stored in Postgres
-        for i in range(len(documents)):
-            documents[i].text = documents[i].text.replace("\u0000", "")
+        documents: list[Document] = []
+        for source_document in docling_documents:
+            documents.extend(
+                IngestionHelper._chunk_document_by_markdown_heading(source_document)
+            )
+
+        for document in documents:
+            document.text = document.text.replace("\u0000", "")
 
         return documents
 
     @staticmethod
-    def _exclude_metadata(documents: list[Document]) -> None:
+    def _chunk_document_by_markdown_heading(source_document: Document) -> list[Document]:
+        text = source_document.text or ""
+        chunks: list[Document] = []
+
+        heading_matches = list(_HEADING_PATTERN.finditer(text))
+        if not heading_matches:
+            cloned_document = Document(text=text, doc_id=source_document.doc_id)
+            cloned_document.metadata = IngestionHelper._clone_metadata(source_document)
+            chunks.append(cloned_document)
+            return chunks
+
+        # Capture text that appears before the first heading as its own chunk
+        first_heading_start = heading_matches[0].start()
+        prefix = text[:first_heading_start].strip()
+        if prefix:
+            chunk_doc = Document(
+                text=prefix,
+                doc_id=f"{source_document.doc_id}_preamble",
+            )
+            chunk_doc.metadata = IngestionHelper._clone_metadata(source_document)
+            chunk_doc.metadata["chapter_title"] = "Preamble"
+            chunk_doc.metadata["chapter_level"] = 0
+            chunks.append(chunk_doc)
+
+        for idx, match in enumerate(heading_matches):
+            start = match.start()
+            end = (
+                heading_matches[idx + 1].start()
+                if idx + 1 < len(heading_matches)
+                else len(text)
+            )
+            chunk_text = text[start:end].strip()
+            if not chunk_text:
+                continue
+            heading_line = match.group("heading")
+            chunk_doc = Document(
+                text=chunk_text,
+                doc_id=f"{source_document.doc_id}_chapter_{idx}",
+            )
+            chunk_doc.metadata = IngestionHelper._clone_metadata(source_document)
+            chunk_doc.metadata["chapter_title"] = heading_line.lstrip("#").strip()
+            chunk_doc.metadata["chapter_level"] = heading_line.count("#")
+            chunks.append(chunk_doc)
+
+        return chunks
+
+    @staticmethod
+    def _clone_metadata(document: Document) -> dict[str, Any]:
+        metadata = getattr(document, "metadata", {}) or {}
+        return deepcopy(metadata)
+
+    @staticmethod
+def _exclude_metadata(documents: list[Document]) -> None:
         logger.debug("Excluding metadata from count=%s documents", len(documents))
         for document in documents:
             document.metadata["doc_id"] = document.doc_id
