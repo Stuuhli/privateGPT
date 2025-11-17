@@ -365,9 +365,22 @@ class PrivateGptUi:
 
     def _build_ui_blocks(self) -> gr.Blocks:
         logger.debug("Creating the UI blocks")
+        ui_settings = settings().ui
+        gradio_auth: list[tuple[str, str]] | None = None
+        if ui_settings.auth.enabled:
+            if not ui_settings.auth.username or not ui_settings.auth.password:
+                msg = "UI authentication is enabled but username or password is missing"
+                raise ValueError(msg)
+            gradio_auth = [
+                (
+                    ui_settings.auth.username,
+                    ui_settings.auth.password,
+                )
+            ]
         with gr.Blocks(
             title=UI_TAB_TITLE,
             theme=gr.themes.Soft(primary_hue=slate),
+            auth=gradio_auth,
             css=".logo { "
             "display:flex;"
             "background-color: #C7BAFF;"

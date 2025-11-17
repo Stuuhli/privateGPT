@@ -354,9 +354,28 @@ class AzureOpenAISettings(BaseModel):
     )
 
 
+class UIAuthSettings(BaseModel):
+    enabled: bool = Field(
+        False,
+        description="Flag indicating if authentication is enabled for the Gradio UI.",
+    )
+    username: str | None = Field(
+        None,
+        description="Username (or email) required to authenticate with the Gradio UI.",
+    )
+    password: str | None = Field(
+        None,
+        description="Password required to authenticate with the Gradio UI.",
+    )
+
+
 class UISettings(BaseModel):
     enabled: bool
     path: str
+    auth: UIAuthSettings = Field(
+        default_factory=UIAuthSettings,
+        description="Authentication settings for the Gradio UI.",
+    )
     default_mode: Literal["RAG", "Search", "Basic", "Summarize"] = Field(
         "RAG",
         description="The default mode.",
